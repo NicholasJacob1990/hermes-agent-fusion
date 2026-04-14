@@ -49,7 +49,17 @@ from hermes_cli.config import load_config, save_config
 from hermes_cli.models import curated_models_for_provider, list_available_providers
 from hermes_state import SessionDB
 from tools.memory_tool import MemoryStore
-from tools.skills_tool import skill_view, skills_categories, skills_list
+from tools.skills_tool import (
+    SKILLS_DIR,
+    _EXCLUDED_SKILL_DIRS,
+    _get_category_from_path,
+    _parse_frontmatter,
+    _parse_tags,
+    skill_view,
+    skills_categories,
+    skills_list,
+)
+from pathlib import Path as _SkillPath
 
 logger = logging.getLogger(__name__)
 
@@ -1292,12 +1302,159 @@ class APIServerAdapter(BasePlatformAdapter):
         return web.json_response(result, status=status)
 
     async def _handle_list_skills(self, request: "web.Request") -> "web.Response":
-        """GET /api/skills — list skills."""
+        """GET /api/skills — enriched list for Hermes Workspace UI.
+
+        Supports ?tab=installed|marketplace, ?category=, ?q=, ?limit=.
+        Returns skills with: name, description, category, tags, source,
+        trust_level, installed, author, version, path, identifier.
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+
         category = (request.query.get("category") or "").strip() or None
-        return web.json_response(json.loads(skills_list(category=category)))
+        tab = (request.query.get("tab") or "").strip() or None
+        q = (request.query.get("q") or "").strip() or None
+        try:
+            limit = int(request.query.get("limit") or 0) or None
+        except (ValueError, TypeError):
+            limit = None
+
+        skills = self._scan_rich_skills()
+
+        if category:
+            skills = [s for s in skills if s.get("category") == category]
+        if tab == "installed":
+            skills = [s for s in skills if s.get("installed")]
+        # tab == "marketplace" -> empty; handled by /api/skills/hub-search stub
+        if q:
+            needle = q.lower()
+            skills = [
+                s for s in skills
+                if needle in s["name"].lower()
+                or needle in (s.get("description") or "").lower()
+                or any(needle in t.lower() for t in s.get("tags", []))
+            ]
+
+        categories = sorted({s["category"] for s in skills if s.get("category")})
+        total = len(skills)
+        if limit:
+            skills = skills[:limit]
+
+        return web.json_response({
+            "success": True,
+            "skills": skills,
+            "categories": categories,
+            "count": total,
+            "tab": tab,
+            "hint": "Installed tab shows local skills; marketplace requires clawhub CLI.",
+        })
+
+    def _scan_rich_skills(self) -> list:
+        """Enrich skills from SKILL.md frontmatter for workspace UI."""
+        if not SKILLS_DIR.exists():
+            return []
+        rich = []
+        seen: set = set()
+        for skill_md in SKILLS_DIR.rglob("SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            skill_dir = skill_md.parent
+            try:
+                content = skill_md.read_text(encoding="utf-8")[:4000]
+                fm, body = _parse_frontmatter(content)
+            except (UnicodeDecodeError, PermissionError, OSError):
+                continue
+
+            name = str(fm.get("name") or skill_dir.name).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+
+            description = str(fm.get("description") or "").strip()
+            if not description:
+                for line in body.strip().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        description = line
+                        break
+
+            category = _get_category_from_path(skill_md)
+
+            tags = []
+            md = fm.get("metadata") or {}
+            hermes_meta = md.get("hermes", {}) if isinstance(md, dict) else {}
+            if isinstance(hermes_meta, dict) and hermes_meta.get("tags"):
+                tags.extend(_parse_tags(hermes_meta["tags"]))
+            if fm.get("tags"):
+                tags.extend(_parse_tags(fm["tags"]))
+            tags = list(dict.fromkeys(tags))
+
+            path_str = str(skill_md.resolve())
+            if "/hub/" in path_str:
+                source, trust = "hub", "verified"
+            else:
+                source, trust = "builtin", "builtin"
+
+            related = []
+            if isinstance(hermes_meta, dict) and hermes_meta.get("related_skills"):
+                related = _parse_tags(hermes_meta["related_skills"])
+
+            rich.append({
+                "id": name,
+                "name": name,
+                "description": description,
+                "category": category,
+                "tags": tags,
+                "triggers": _parse_tags(fm.get("triggers")) if fm.get("triggers") else [],
+                "source": source,
+                "trust_level": trust,
+                "installed": True,
+                "author": str(fm.get("author") or (hermes_meta.get("author") if isinstance(hermes_meta, dict) else "") or "").strip() or None,
+                "version": str(fm.get("version") or "").strip() or None,
+                "license": str(fm.get("license") or "").strip() or None,
+                "path": str(skill_md.relative_to(_SkillPath.home())) if skill_md.is_relative_to(_SkillPath.home()) else str(skill_md),
+                "identifier": f"{source}:{name}",
+                "repo": (hermes_meta.get("repo") if isinstance(hermes_meta, dict) else None),
+                "homepage": (hermes_meta.get("homepage") if isinstance(hermes_meta, dict) else None) or fm.get("homepage"),
+                "related_skills": related,
+                "extra": {},
+            })
+
+        rich.sort(key=lambda s: (s.get("category") or "zzz", s["name"]))
+        return rich
+
+    async def _handle_hub_search(self, request: "web.Request") -> "web.Response":
+        """GET /api/skills/hub-search — marketplace stub (clawhub CLI not installed)."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        return web.json_response({
+            "success": True,
+            "skills": [],
+            "count": 0,
+            "hint": "Marketplace requires clawhub CLI. Installed tab works for local skills.",
+        })
+
+    async def _handle_skill_install_stub(self, request: "web.Request") -> "web.Response":
+        """POST /api/skills/install — stub returning 501."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        return web.json_response(
+            {"error": "Skill install requires clawhub CLI (not installed on this host)."},
+            status=501,
+        )
+
+    async def _handle_skill_uninstall_stub(self, request: "web.Request") -> "web.Response":
+        """POST /api/skills/uninstall — stub returning 501."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        return web.json_response(
+            {"error": "Skill uninstall requires clawhub CLI (not installed on this host)."},
+            status=501,
+        )
 
     async def _handle_skill_categories(self, request: "web.Request") -> "web.Response":
         """GET /api/skills/categories — list skill categories."""
@@ -2660,6 +2817,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_delete("/api/memory", self._handle_delete_memory)
             self._app.router.add_get("/api/skills", self._handle_list_skills)
             self._app.router.add_get("/api/skills/categories", self._handle_skill_categories)
+            # Reserved paths BEFORE {name} wildcard so they aren't captured as a skill name
+            self._app.router.add_get("/api/skills/hub-search", self._handle_hub_search)
+            self._app.router.add_post("/api/skills/install", self._handle_skill_install_stub)
+            self._app.router.add_post("/api/skills/uninstall", self._handle_skill_uninstall_stub)
             self._app.router.add_get("/api/skills/{name}", self._handle_view_skill)
             self._app.router.add_get("/api/config", self._handle_get_config)
             self._app.router.add_patch("/api/config", self._handle_update_config)
