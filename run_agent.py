@@ -7796,8 +7796,11 @@ class AIAgent:
         self.iteration_budget = IterationBudget(self.max_iterations)
 
         # Log conversation turn start for debugging/observability
-        _msg_preview = (user_message[:80] + "...") if len(user_message) > 80 else user_message
-        _msg_preview = _msg_preview.replace("\n", " ")
+        if isinstance(user_message, str):
+            _msg_preview = (user_message[:80] + "...") if len(user_message) > 80 else user_message
+            _msg_preview = _msg_preview.replace("\n", " ")
+        else:
+            _msg_preview = f"[multimodal: {len(user_message)} parts]"
         logger.info(
             "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
             self.session_id or "none", self.model, self.provider or "unknown",
@@ -7844,7 +7847,10 @@ class AIAgent:
         self._persist_user_message_idx = current_turn_user_idx
         
         if not self.quiet_mode:
-            self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+            if isinstance(user_message, str):
+                self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+            else:
+                self._safe_print(f"💬 Starting conversation: [multimodal message with {len(user_message)} parts]")
         
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
