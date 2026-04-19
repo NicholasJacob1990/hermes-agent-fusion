@@ -85,6 +85,10 @@ def _import_sounddevice():
 DEFAULT_PROVIDER = "edge"
 DEFAULT_EDGE_VOICE = "en-US-AriaNeural"
 DEFAULT_ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam
+
+
+def _provider_supports_native_opus(provider: str) -> bool:
+    return provider in ("openai", "elevenlabs", "mistral", "gemini")
 DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
 DEFAULT_ELEVENLABS_STREAMING_MODEL_ID = "eleven_flash_v2_5"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts"
@@ -758,6 +762,91 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
     return output_path
 
 
+def _generate_with_provider(provider: str, text: str, file_str: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio with a specific provider or raise on failure."""
+    if provider == "elevenlabs":
+        try:
+            _import_elevenlabs()
+        except ImportError as exc:
+            raise ValueError(
+                "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"
+            ) from exc
+        logger.info("Generating speech with ElevenLabs...")
+        _generate_elevenlabs(text, file_str, tts_config)
+
+    elif provider == "openai":
+        try:
+            _import_openai_client()
+        except ImportError as exc:
+            raise ValueError(
+                "OpenAI provider selected but 'openai' package not installed."
+            ) from exc
+        logger.info("Generating speech with OpenAI TTS...")
+        _generate_openai_tts(text, file_str, tts_config)
+
+    elif provider == "minimax":
+        logger.info("Generating speech with MiniMax TTS...")
+        _generate_minimax_tts(text, file_str, tts_config)
+
+    elif provider == "xai":
+        logger.info("Generating speech with xAI TTS...")
+        _generate_xai_tts(text, file_str, tts_config)
+
+    elif provider == "mistral":
+        try:
+            _import_mistral_client()
+        except ImportError as exc:
+            raise ValueError(
+                "Mistral provider selected but 'mistralai' package not installed. "
+                "Run: pip install 'hermes-agent[mistral]'"
+            ) from exc
+        logger.info("Generating speech with Mistral Voxtral TTS...")
+        _generate_mistral_tts(text, file_str, tts_config)
+
+    elif provider == "gemini":
+        logger.info("Generating speech with Google Gemini TTS...")
+        _generate_gemini_tts(text, file_str, tts_config)
+
+    elif provider == "neutts":
+        if not _check_neutts_available():
+            raise ValueError(
+                "NeuTTS provider selected but neutts is not installed. "
+                "Run hermes setup and choose NeuTTS, or install espeak-ng and run python -m pip install -U neutts[all]."
+            )
+        logger.info("Generating speech with NeuTTS (local)...")
+        _generate_neutts(text, file_str, tts_config)
+
+    else:
+        # Default: Edge TTS (free), with NeuTTS as local fallback
+        edge_available = True
+        try:
+            _import_edge_tts()
+        except ImportError:
+            edge_available = False
+
+        if edge_available:
+            logger.info("Generating speech with Edge TTS...")
+            try:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(
+                        lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))
+                    ).result(timeout=60)
+            except RuntimeError:
+                asyncio.run(_generate_edge_tts(text, file_str, tts_config))
+        elif _check_neutts_available():
+            logger.info("Edge TTS not available, falling back to NeuTTS (local)...")
+            provider = "neutts"
+            _generate_neutts(text, file_str, tts_config)
+        else:
+            raise ValueError(
+                "No TTS provider available. Install edge-tts (pip install edge-tts) "
+                "or set up NeuTTS for local synthesis."
+            )
+
+    return provider
+
+
 # ===========================================================================
 # Main tool function
 # ===========================================================================
@@ -821,97 +910,27 @@ def text_to_speech_tool(
 
     try:
         # Generate audio with the configured provider
-        if provider == "elevenlabs":
-            try:
-                _import_elevenlabs()
-            except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"
-                }, ensure_ascii=False)
-            logger.info("Generating speech with ElevenLabs...")
-            _generate_elevenlabs(text, file_str, tts_config)
-
-        elif provider == "openai":
-            try:
-                _import_openai_client()
-            except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "OpenAI provider selected but 'openai' package not installed."
-                }, ensure_ascii=False)
-            logger.info("Generating speech with OpenAI TTS...")
-            _generate_openai_tts(text, file_str, tts_config)
-
-        elif provider == "minimax":
-            logger.info("Generating speech with MiniMax TTS...")
-            _generate_minimax_tts(text, file_str, tts_config)
-
-        elif provider == "xai":
-            logger.info("Generating speech with xAI TTS...")
-            _generate_xai_tts(text, file_str, tts_config)
-
-        elif provider == "mistral":
-            try:
-                _import_mistral_client()
-            except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "Mistral provider selected but 'mistralai' package not installed. "
-                             "Run: pip install 'hermes-agent[mistral]'"
-                }, ensure_ascii=False)
-            logger.info("Generating speech with Mistral Voxtral TTS...")
-            _generate_mistral_tts(text, file_str, tts_config)
-
-        elif provider == "gemini":
-            logger.info("Generating speech with Google Gemini TTS...")
-            _generate_gemini_tts(text, file_str, tts_config)
-
-        elif provider == "neutts":
-            if not _check_neutts_available():
-                return json.dumps({
-                    "success": False,
-                    "error": "NeuTTS provider selected but neutts is not installed. "
-                             "Run hermes setup and choose NeuTTS, or install espeak-ng and run python -m pip install -U neutts[all]."
-                }, ensure_ascii=False)
-            logger.info("Generating speech with NeuTTS (local)...")
-            _generate_neutts(text, file_str, tts_config)
-
-        else:
-            # Default: Edge TTS (free), with NeuTTS as local fallback
-            edge_available = True
-            try:
-                _import_edge_tts()
-            except ImportError:
-                edge_available = False
-
-            if edge_available:
-                logger.info("Generating speech with Edge TTS...")
-                try:
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        pool.submit(
-                            lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))
-                        ).result(timeout=60)
-                except RuntimeError:
-                    asyncio.run(_generate_edge_tts(text, file_str, tts_config))
-            elif _check_neutts_available():
-                logger.info("Edge TTS not available, falling back to NeuTTS (local)...")
-                provider = "neutts"
-                _generate_neutts(text, file_str, tts_config)
-            else:
-                return json.dumps({
-                    "success": False,
-                    "error": "No TTS provider available. Install edge-tts (pip install edge-tts) "
-                             "or set up NeuTTS for local synthesis."
-                }, ensure_ascii=False)
+        provider = _generate_with_provider(provider, text, file_str, tts_config)
 
         # Check the file was actually created
         if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
-            return json.dumps({
-                "success": False,
-                "error": f"TTS generation produced no output (provider: {provider})"
-            }, ensure_ascii=False)
+            fallback_provider = str(tts_config.get("fallback_provider") or "").strip().lower()
+            if fallback_provider and fallback_provider != provider:
+                fallback_path = file_str
+                if want_opus and _provider_supports_native_opus(fallback_provider):
+                    fallback_path = str(Path(file_str).with_suffix(".ogg"))
+                logger.warning(
+                    "Primary TTS provider %s produced no output; retrying with fallback provider %s",
+                    provider,
+                    fallback_provider,
+                )
+                provider = _generate_with_provider(fallback_provider, text, fallback_path, tts_config)
+                file_str = fallback_path
+            if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
+                return json.dumps({
+                    "success": False,
+                    "error": f"TTS generation produced no output (provider: {provider})"
+                }, ensure_ascii=False)
 
         # Try Opus conversion for Telegram compatibility
         # Edge TTS outputs MP3, NeuTTS outputs WAV — both need ffmpeg conversion
@@ -921,7 +940,7 @@ def text_to_speech_tool(
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
+        elif _provider_supports_native_opus(provider):
             voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
@@ -941,6 +960,52 @@ def text_to_speech_tool(
         }, ensure_ascii=False)
 
     except ValueError as e:
+        fallback_provider = str(tts_config.get("fallback_provider") or "").strip().lower()
+        if fallback_provider and fallback_provider != provider:
+            try:
+                fallback_path = file_str
+                if want_opus and _provider_supports_native_opus(fallback_provider):
+                    fallback_path = str(Path(file_str).with_suffix(".ogg"))
+                logger.warning(
+                    "Primary TTS provider %s failed with configuration error (%s); retrying fallback provider %s",
+                    provider,
+                    e,
+                    fallback_provider,
+                )
+                provider = _generate_with_provider(fallback_provider, text, fallback_path, tts_config)
+                file_str = fallback_path
+                if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
+                    return json.dumps({
+                        "success": False,
+                        "error": f"TTS generation produced no output (provider: {provider})"
+                    }, ensure_ascii=False)
+                voice_compatible = False
+                if provider in ("edge", "neutts", "minimax", "xai") and not file_str.endswith(".ogg"):
+                    opus_path = _convert_to_opus(file_str)
+                    if opus_path:
+                        file_str = opus_path
+                        voice_compatible = True
+                elif _provider_supports_native_opus(provider):
+                    voice_compatible = file_str.endswith(".ogg")
+                file_size = os.path.getsize(file_str)
+                logger.info("TTS audio saved via fallback: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
+                media_tag = f"MEDIA:{file_str}"
+                if voice_compatible:
+                    media_tag = f"[[audio_as_voice]]\n{media_tag}"
+                return json.dumps({
+                    "success": True,
+                    "file_path": file_str,
+                    "media_tag": media_tag,
+                    "provider": provider,
+                    "voice_compatible": voice_compatible,
+                }, ensure_ascii=False)
+            except Exception as fallback_error:
+                error_msg = (
+                    f"TTS configuration error ({provider}): {e}; "
+                    f"fallback {fallback_provider} failed: {fallback_error}"
+                )
+                logger.error("%s", error_msg, exc_info=True)
+                return tool_error(error_msg, success=False)
         # Configuration errors (missing API keys, etc.)
         error_msg = f"TTS configuration error ({provider}): {e}"
         logger.error("%s", error_msg)
@@ -951,6 +1016,52 @@ def text_to_speech_tool(
         logger.error("%s", error_msg, exc_info=True)
         return tool_error(error_msg, success=False)
     except Exception as e:
+        fallback_provider = str(tts_config.get("fallback_provider") or "").strip().lower()
+        if fallback_provider and fallback_provider != provider:
+            try:
+                fallback_path = file_str
+                if want_opus and _provider_supports_native_opus(fallback_provider):
+                    fallback_path = str(Path(file_str).with_suffix(".ogg"))
+                logger.warning(
+                    "Primary TTS provider %s failed (%s); retrying fallback provider %s",
+                    provider,
+                    e,
+                    fallback_provider,
+                )
+                provider = _generate_with_provider(fallback_provider, text, fallback_path, tts_config)
+                file_str = fallback_path
+                if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
+                    return json.dumps({
+                        "success": False,
+                        "error": f"TTS generation produced no output (provider: {provider})"
+                    }, ensure_ascii=False)
+                voice_compatible = False
+                if provider in ("edge", "neutts", "minimax", "xai") and not file_str.endswith(".ogg"):
+                    opus_path = _convert_to_opus(file_str)
+                    if opus_path:
+                        file_str = opus_path
+                        voice_compatible = True
+                elif _provider_supports_native_opus(provider):
+                    voice_compatible = file_str.endswith(".ogg")
+                file_size = os.path.getsize(file_str)
+                logger.info("TTS audio saved via fallback: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
+                media_tag = f"MEDIA:{file_str}"
+                if voice_compatible:
+                    media_tag = f"[[audio_as_voice]]\n{media_tag}"
+                return json.dumps({
+                    "success": True,
+                    "file_path": file_str,
+                    "media_tag": media_tag,
+                    "provider": provider,
+                    "voice_compatible": voice_compatible,
+                }, ensure_ascii=False)
+            except Exception as fallback_error:
+                error_msg = (
+                    f"TTS generation failed ({provider}): {e}; "
+                    f"fallback {fallback_provider} failed: {fallback_error}"
+                )
+                logger.error("%s", error_msg, exc_info=True)
+                return tool_error(error_msg, success=False)
         # Unexpected errors
         error_msg = f"TTS generation failed ({provider}): {e}"
         logger.error("%s", error_msg, exc_info=True)
