@@ -18,10 +18,11 @@ conversation as typed turns — they share the session_id.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from fastapi import WebSocket
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
@@ -58,6 +59,7 @@ def build_voice_pipeline(
     *,
     websocket: WebSocket,
     hermes_session_id: str,
+    observer: Optional[FrameProcessor] = None,
 ) -> Tuple[Pipeline, FastAPIWebsocketTransport, HermesPipecatBridge]:
     """Assemble the Pipecat pipeline for a single browser voice call.
 
@@ -69,6 +71,11 @@ def build_voice_pipeline(
         The Hermes session the voice turns must join. Persisted turns go
         to SQLite tagged with ``modality='voice'`` so the chat UI can
         render them alongside typed turns.
+    observer:
+        Optional passive processor placed between the Gemini service and
+        the transport output. Use this to tap transcription and boundary
+        frames (e.g. the :class:`VoiceTurnFrameObserver`) without forking
+        the pipeline.
     """
     params = FastAPIWebsocketParams(
         audio_in_enabled=True,
@@ -89,5 +96,10 @@ def build_voice_pipeline(
 
     gemini_service = create_gemini_live_service(config=config, bridge=bridge)
 
-    pipeline = Pipeline([transport.input(), gemini_service, transport.output()])
+    processors = [transport.input(), gemini_service]
+    if observer is not None:
+        processors.append(observer)
+    processors.append(transport.output())
+
+    pipeline = Pipeline(processors)
     return pipeline, transport, bridge

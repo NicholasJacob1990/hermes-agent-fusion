@@ -11,6 +11,7 @@ from webapi.routes.memory import router as memory_router
 from webapi.routes.models import router as models_router
 from webapi.routes.sessions import router as sessions_router
 from webapi.routes.skills import router as skills_router
+from webapi.routes.voice import router as voice_router
 
 # Default origins cover common local dev ports (3000-3010) + any explicitly
 # configured origin via HERMES_CORS_ORIGINS (comma-separated).
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(skills_router)
     app.include_router(config_router)
+    app.include_router(voice_router)
 
     return app
 

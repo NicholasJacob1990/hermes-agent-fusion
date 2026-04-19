@@ -61,12 +61,37 @@ def test_build_voice_pipeline_wires_transport_gemini_output():
         mock_factory.assert_called_once()
         assert mock_factory.call_args.kwargs["bridge"] is bridge
 
-        # Pipeline = [input, gemini, output]
+        # Pipeline = [input, gemini, output] when no observer provided
         MockPipeline.assert_called_once_with(
             ["TRANSPORT_INPUT", "GEMINI_SERVICE", "TRANSPORT_OUTPUT"]
         )
         assert pipeline == "PIPELINE"
         assert transport is mock_transport
+
+
+def test_observer_is_inserted_between_gemini_and_output():
+    websocket = MagicMock(name="websocket")
+    observer = MagicMock(name="observer")
+
+    with (
+        patch("webapi.voice.pipeline_builder.FastAPIWebsocketTransport") as MockTransport,
+        patch("webapi.voice.pipeline_builder.FastAPIWebsocketParams"),
+        patch("webapi.voice.pipeline_builder.create_gemini_live_service") as mock_factory,
+        patch("webapi.voice.pipeline_builder.Pipeline") as MockPipeline,
+    ):
+        mock_transport = MagicMock()
+        mock_transport.input.return_value = "IN"
+        mock_transport.output.return_value = "OUT"
+        MockTransport.return_value = mock_transport
+        mock_factory.return_value = "GEMINI"
+
+        build_voice_pipeline(
+            websocket=websocket,
+            hermes_session_id="s",
+            observer=observer,
+        )
+
+        MockPipeline.assert_called_once_with(["IN", "GEMINI", observer, "OUT"])
 
 
 def test_bridge_factory_binds_agent_to_hermes_session():
