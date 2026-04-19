@@ -1,0 +1,256 @@
+name: Sync vanilla (NousResearch/hermes-agent)
+
+on:
+  schedule:
+    - cron: "30 9 * * *"  # daily 09:30 UTC (offset from frontend job)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force run even if no upstream commits"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UPSTREAM_REPO: NousResearch/hermes-agent
+      UPSTREAM_URL: https://github.com/NousResearch/hermes-agent.git
+      UPSTREAM_REMOTE: vanilla
+      FORCE_INPUT: ${{ github.event.inputs.force }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add "$UPSTREAM_REMOTE" "$UPSTREAM_URL" 2>/dev/null || true
+          git fetch "$UPSTREAM_REMOTE" main
+
+      - name: Detect divergence
+        id: detect
+        run: |
+          BEHIND=$(git rev-list --count "HEAD..${UPSTREAM_REMOTE}/main")
+          AHEAD=$(git rev-list --count "${UPSTREAM_REMOTE}/main..HEAD")
+          UPSTREAM_HEAD=$(git rev-parse --short "${UPSTREAM_REMOTE}/main")
+          {
+            echo "behind=$BEHIND"
+            echo "ahead=$AHEAD"
+            echo "upstream_head=$UPSTREAM_HEAD"
+          } >> "$GITHUB_OUTPUT"
+          echo "Behind ${UPSTREAM_REMOTE}/main by $BEHIND commits, ahead by $AHEAD."
+          if [ "$BEHIND" = "0" ] && [ "$FORCE_INPUT" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No-op exit if up-to-date
+        if: steps.detect.outputs.skip == 'true'
+        run: echo "Already in sync with upstream — exiting."
+
+      - name: Estimate scope
+        if: steps.detect.outputs.skip != 'true'
+        id: scope
+        run: |
+          FILES_CHANGED=$(git diff --name-only "HEAD..${UPSTREAM_REMOTE}/main" | wc -l | tr -d ' ')
+          LINES=$(git diff --shortstat "HEAD..${UPSTREAM_REMOTE}/main" | grep -oE '[0-9]+ insert' | head -1 | grep -oE '[0-9]+' || echo 0)
+          {
+            echo "files=$FILES_CHANGED"
+            echo "lines=$LINES"
+          } >> "$GITHUB_OUTPUT"
+          echo "Will merge: $FILES_CHANGED files, ~$LINES insertions."
+
+      - name: Create sync branch
+        if: steps.detect.outputs.skip != 'true'
+        id: branch
+        env:
+          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+        run: |
+          BRANCH="auto/vanilla-sync-$(date +%F)-${UPSTREAM_HEAD}"
+          git checkout -b "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Attempt merge
+        if: steps.detect.outputs.skip != 'true'
+        id: merge
+        run: |
+          set +e
+          git merge "${UPSTREAM_REMOTE}/main" --no-edit
+          MERGE_RC=$?
+          set -e
+          if [ "$MERGE_RC" -eq 0 ]; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+            echo "Clean merge, no conflicts."
+          else
+            CONFLICTS=$(git diff --name-only --diff-filter=U | wc -l | tr -d ' ')
+            {
+              echo "status=conflicted"
+              echo "conflicts=$CONFLICTS"
+            } >> "$GITHUB_OUTPUT"
+            echo "Merge halted with $CONFLICTS conflicted files."
+          fi
+
+      - name: Resolve conflicts via Claude
+        if: steps.merge.outputs.status == 'conflicted'
+        id: claude
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ steps.branch.outputs.name }}
+            UPSTREAM HEAD: ${{ steps.detect.outputs.upstream_head }}
+            CONFLICTED FILES: ${{ steps.merge.outputs.conflicts }}
+            COMMITS BEHIND BEFORE MERGE: ${{ steps.detect.outputs.behind }}
+
+            A `git merge vanilla/main` is in progress with conflicts staged.
+            Read `.github/upstream-sync-prompt.md` for the full conflict
+            resolution policy and `.github/upstream-sync-memory.md` for
+            prior decisions. Then resolve each conflict, commit the merge,
+            and append new decisions to the memory file.
+
+            DO NOT push or open PRs — the workflow handles that next.
+          claude_args: |
+            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(cat:*),Bash(find:*),Bash(awk:*),Bash(sed:*)"
+
+      - name: Verify resolution
+        if: steps.merge.outputs.status == 'conflicted'
+        id: verify
+        run: |
+          REMAINING=$(git diff --name-only --diff-filter=U | wc -l | tr -d ' ')
+          MARKERS=$(grep -rE '^(<<<<<<<|>>>>>>>) ' \
+            --include='*.py' --include='*.json' \
+            --include='*.yml' --include='*.yaml' \
+            --include='*.toml' --include='*.md' . 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$REMAINING" != "0" ] || [ "$MARKERS" != "0" ]; then
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+            echo "$REMAINING unresolved files, $MARKERS conflict markers in tree."
+          else
+            echo "resolved=true" >> "$GITHUB_OUTPUT"
+            echo "All conflicts resolved cleanly."
+          fi
+
+      - name: Push sync branch
+        if: steps.detect.outputs.skip != 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          git push origin "$BRANCH"
+
+      - name: Open PR (clean merge or successful resolution)
+        if: |
+          steps.detect.outputs.skip != 'true' &&
+          (steps.merge.outputs.status == 'clean' || steps.verify.outputs.resolved == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          BEHIND: ${{ steps.detect.outputs.behind }}
+          FILES: ${{ steps.scope.outputs.files }}
+          LINES: ${{ steps.scope.outputs.lines }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          RESOLVED: ${{ steps.verify.outputs.resolved }}
+        run: |
+          TITLE="auto: vanilla sync ${UPSTREAM_HEAD} ($(date +%F))"
+          BODY=$(cat <<EOF
+          Automated vanilla sync from \`NousResearch/hermes-agent\`.
+
+          - Commits behind: ${BEHIND}
+          - Files changed: ${FILES}
+          - Insertions: ~${LINES}
+          - Conflicts: ${CONFLICTS:-0} (resolved: ${RESOLVED:-n/a})
+          - Upstream HEAD: \`${UPSTREAM_HEAD}\`
+
+          Review the merge commit message for per-file decisions. Memory
+          updates are in \`.github/upstream-sync-memory.md\`.
+          EOF
+          )
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "auto-sync"
+
+      - name: Open draft PR + flag for human review
+        if: |
+          steps.detect.outputs.skip != 'true' &&
+          steps.merge.outputs.status == 'conflicted' &&
+          steps.verify.outputs.resolved != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          TITLE="auto: vanilla sync ${UPSTREAM_HEAD} — NEEDS HUMAN REVIEW"
+          BODY=$(cat <<EOF
+          Auto-sync ran into conflicts Claude could not fully resolve.
+
+          - Conflicts: ${CONFLICTS} files
+          - Resolution status: failed or partial
+
+          Branch \`${BRANCH}\` has unresolved markers. Check
+          \`.github/last-sync-triage.md\` if Claude wrote one before giving
+          up. Otherwise, manual merge needed.
+
+          Local fallback: run \`~/scripts/local-upstream-sync.sh\` on a
+          machine with Claude Code installed — it will pick up this PR via
+          the \`needs-local-sync\` label and retry locally.
+          EOF
+          )
+          gh pr create \
+            --draft \
+            --base main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "needs-human-review,needs-local-sync"
+
+      - name: Trigger local fallback issue (if Claude action quota failed)
+        if: |
+          steps.detect.outputs.skip != 'true' &&
+          steps.merge.outputs.status == 'conflicted' &&
+          steps.claude.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          TITLE="Local fallback needed: vanilla sync ${UPSTREAM_HEAD}"
+          BODY=$(cat <<EOF
+          Claude Code Action failed (likely quota or transient error).
+
+          Branch: \`${BRANCH}\`
+          Conflicts: ${CONFLICTS} files
+          Upstream HEAD: \`${UPSTREAM_HEAD}\`
+
+          Run local fallback:
+          \`\`\`
+          cd ~/Documents/Aplicativos/hermes-agent-fusion
+          git fetch origin
+          git checkout ${BRANCH}
+          ~/scripts/local-upstream-sync.sh
+          \`\`\`
+
+          The local script (launchd-scheduled) polls for issues with the
+          \`needs-local-sync\` label every 4h and retries automatically.
+          EOF
+          )
+          gh issue create \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "needs-local-sync,auto-sync-failure"
