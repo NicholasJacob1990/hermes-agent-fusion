@@ -1,13 +1,13 @@
-name: Sync vanilla (NousResearch/hermes-agent)
+name: Sync enhanced (outsourc-e/hermes-agent)
 
 on:
   schedule:
-    # Weekly — Monday 10:00 UTC (offset -1h from enhanced weekly sync)
-    - cron: "0 10 * * 1"
+    # Weekly — Monday 11:00 UTC (offset +1h from vanilla weekly sync)
+    - cron: "0 11 * * 1"
   workflow_dispatch:
     inputs:
       force:
-        description: "Force run even if no upstream commits"
+        description: "Force run even if no enhanced commits"
         required: false
         default: "false"
 
@@ -22,9 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      UPSTREAM_REPO: NousResearch/hermes-agent
-      UPSTREAM_URL: https://github.com/NousResearch/hermes-agent.git
-      UPSTREAM_REMOTE: vanilla
+      ENHANCED_REPO: outsourc-e/hermes-agent
+      ENHANCED_URL: https://github.com/outsourc-e/hermes-agent.git
+      ENHANCED_REMOTE: enhanced
+      # Isolate untrusted workflow_dispatch input in env per security best-practice
+      # (never inline ${{ github.event.* }} directly in run: commands).
       FORCE_INPUT: ${{ github.event.inputs.force }}
 
     steps:
@@ -37,35 +39,39 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add "$UPSTREAM_REMOTE" "$UPSTREAM_URL" 2>/dev/null || true
-          git fetch "$UPSTREAM_REMOTE" main
+          git remote add "$ENHANCED_REMOTE" "$ENHANCED_URL" 2>/dev/null || true
+          git fetch "$ENHANCED_REMOTE" main
 
       - name: Detect divergence
         id: detect
         run: |
-          BEHIND=$(git rev-list --count "HEAD..${UPSTREAM_REMOTE}/main")
-          AHEAD=$(git rev-list --count "${UPSTREAM_REMOTE}/main..HEAD")
-          UPSTREAM_HEAD=$(git rev-parse --short "${UPSTREAM_REMOTE}/main")
+          BEHIND=$(git rev-list --count "HEAD..${ENHANCED_REMOTE}/main")
+          AHEAD=$(git rev-list --count "${ENHANCED_REMOTE}/main..HEAD")
+          ENHANCED_HEAD=$(git rev-parse --short "${ENHANCED_REMOTE}/main")
           {
             echo "behind=$BEHIND"
             echo "ahead=$AHEAD"
-            echo "upstream_head=$UPSTREAM_HEAD"
+            echo "enhanced_head=$ENHANCED_HEAD"
           } >> "$GITHUB_OUTPUT"
-          echo "Behind ${UPSTREAM_REMOTE}/main by $BEHIND commits, ahead by $AHEAD."
+          echo "Behind ${ENHANCED_REMOTE}/main by $BEHIND commits, ahead by $AHEAD."
+          # Guard: only treat "true" as force; any other value = skip when up-to-date.
           if [ "$BEHIND" = "0" ] && [ "$FORCE_INPUT" != "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: No-op exit if up-to-date
         if: steps.detect.outputs.skip == 'true'
-        run: echo "Already in sync with upstream — exiting."
+        run: |
+          echo "Already in sync with enhanced — exiting."
+          echo "Enhanced is intentionally a low-velocity fork (Eric outsourc-e)."
+          echo "This workflow is expected to no-op most weeks."
 
       - name: Estimate scope
         if: steps.detect.outputs.skip != 'true'
         id: scope
         run: |
-          FILES_CHANGED=$(git diff --name-only "HEAD..${UPSTREAM_REMOTE}/main" | wc -l | tr -d ' ')
-          LINES=$(git diff --shortstat "HEAD..${UPSTREAM_REMOTE}/main" | grep -oE '[0-9]+ insert' | head -1 | grep -oE '[0-9]+' || echo 0)
+          FILES_CHANGED=$(git diff --name-only "HEAD..${ENHANCED_REMOTE}/main" | wc -l | tr -d ' ')
+          LINES=$(git diff --shortstat "HEAD..${ENHANCED_REMOTE}/main" | grep -oE '[0-9]+ insert' | head -1 | grep -oE '[0-9]+' || echo 0)
           {
             echo "files=$FILES_CHANGED"
             echo "lines=$LINES"
@@ -76,9 +82,9 @@ jobs:
         if: steps.detect.outputs.skip != 'true'
         id: branch
         env:
-          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          ENHANCED_HEAD: ${{ steps.detect.outputs.enhanced_head }}
         run: |
-          BRANCH="auto/vanilla-sync-$(date +%F)-${UPSTREAM_HEAD}"
+          BRANCH="auto/enhanced-sync-$(date +%F)-${ENHANCED_HEAD}"
           git checkout -b "$BRANCH"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
@@ -87,7 +93,7 @@ jobs:
         id: merge
         run: |
           set +e
-          git merge "${UPSTREAM_REMOTE}/main" --no-edit
+          git merge "${ENHANCED_REMOTE}/main" --no-edit
           MERGE_RC=$?
           set -e
           if [ "$MERGE_RC" -eq 0 ]; then
@@ -112,15 +118,20 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             BRANCH: ${{ steps.branch.outputs.name }}
-            UPSTREAM HEAD: ${{ steps.detect.outputs.upstream_head }}
+            ENHANCED HEAD: ${{ steps.detect.outputs.enhanced_head }}
             CONFLICTED FILES: ${{ steps.merge.outputs.conflicts }}
             COMMITS BEHIND BEFORE MERGE: ${{ steps.detect.outputs.behind }}
 
-            A `git merge vanilla/main` is in progress with conflicts staged.
-            Read `.github/upstream-sync-prompt.md` for the full conflict
-            resolution policy and `.github/upstream-sync-memory.md` for
-            prior decisions. Then resolve each conflict, commit the merge,
-            and append new decisions to the memory file.
+            A `git merge enhanced/main` is in progress with conflicts staged.
+            Enhanced is the `outsourc-e/hermes-agent` fork — a slow-moving
+            Eric fork that tends to ship targeted fixes and web-dashboard
+            patches rather than structural vanilla features.
+
+            Read `.github/enhanced-sync-prompt.md` for the full conflict
+            resolution policy (different from vanilla — enhanced is smaller
+            deltas, more likely to be already-rebranded concepts). Then read
+            `.github/enhanced-sync-memory.md` for prior decisions. Resolve
+            each conflict, commit the merge, and append memory.
 
             DO NOT push or open PRs — the workflow handles that next.
           claude_args: |
@@ -150,32 +161,34 @@ jobs:
         run: |
           git push origin "$BRANCH"
 
-      - name: Open PR (clean merge or successful resolution)
+      - name: Open PR + enable auto-merge (clean or resolved)
         if: |
           steps.detect.outputs.skip != 'true' &&
           (steps.merge.outputs.status == 'clean' || steps.verify.outputs.resolved == 'true')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ steps.branch.outputs.name }}
-          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          ENHANCED_HEAD: ${{ steps.detect.outputs.enhanced_head }}
           BEHIND: ${{ steps.detect.outputs.behind }}
           FILES: ${{ steps.scope.outputs.files }}
           LINES: ${{ steps.scope.outputs.lines }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
           RESOLVED: ${{ steps.verify.outputs.resolved }}
         run: |
-          TITLE="auto: vanilla sync ${UPSTREAM_HEAD} ($(date +%F))"
+          TITLE="auto: enhanced sync ${ENHANCED_HEAD} ($(date +%F))"
           BODY=$(cat <<EOF
-          Automated vanilla sync from \`NousResearch/hermes-agent\`.
+          Automated enhanced sync from \`outsourc-e/hermes-agent\`.
 
           - Commits behind: ${BEHIND}
           - Files changed: ${FILES}
           - Insertions: ~${LINES}
           - Conflicts: ${CONFLICTS:-0} (resolved: ${RESOLVED:-n/a})
-          - Upstream HEAD: \`${UPSTREAM_HEAD}\`
+          - Enhanced HEAD: \`${ENHANCED_HEAD}\`
 
-          Review the merge commit message for per-file decisions. Memory
-          updates are in \`.github/upstream-sync-memory.md\`.
+          Memory updates are in \`.github/enhanced-sync-memory.md\`.
+          Auto-merge ENABLED on this fusion fork — PR merges automatically
+          when required checks pass. Vorbium sibling keeps manual review
+          (see docs/CROSS_FORK_POLICY.md).
           EOF
           )
           PR_URL=$(gh pr create \
@@ -183,11 +196,13 @@ jobs:
             --head "$BRANCH" \
             --title "$TITLE" \
             --body "$BODY" \
-            --label "auto-sync")
+            --label "auto-sync,source-enhanced")
           echo "Created PR: $PR_URL"
-          # Auto-merge (squash). Requires "Allow auto-merge" in repo settings.
+          # Fusion-specific: enable auto-merge (squash). Requires "Allow
+          # auto-merge" in repo settings. Falls through gracefully if
+          # disabled (PR stays open for manual merge).
           gh pr merge "$PR_URL" --auto --squash 2>&1 \
-            || echo "auto-merge not enabled — PR stays open for manual merge"
+            || echo "auto-merge not enabled or check already failed — PR stays open"
 
       - name: Open draft PR + flag for human review
         if: |
@@ -197,23 +212,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ steps.branch.outputs.name }}
-          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          ENHANCED_HEAD: ${{ steps.detect.outputs.enhanced_head }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
         run: |
-          TITLE="auto: vanilla sync ${UPSTREAM_HEAD} — NEEDS HUMAN REVIEW"
+          TITLE="auto: enhanced sync ${ENHANCED_HEAD} — NEEDS HUMAN REVIEW"
           BODY=$(cat <<EOF
-          Auto-sync ran into conflicts Claude could not fully resolve.
+          Auto-sync from enhanced ran into conflicts Claude could not
+          fully resolve.
 
           - Conflicts: ${CONFLICTS} files
           - Resolution status: failed or partial
 
           Branch \`${BRANCH}\` has unresolved markers. Check
-          \`.github/last-sync-triage.md\` if Claude wrote one before giving
-          up. Otherwise, manual merge needed.
+          \`.github/last-enhanced-sync-triage.md\` if Claude wrote one
+          before giving up. Otherwise, manual merge needed.
 
-          Local fallback: run \`~/scripts/local-upstream-sync.sh\` on a
-          machine with Claude Code installed — it will pick up this PR via
-          the \`needs-local-sync\` label and retry locally.
+          Local fallback: run \`~/scripts/local-upstream-sync.sh --source=enhanced\`
+          on a machine with Claude Code installed — it will pick up this
+          PR via the \`needs-local-sync-enhanced\` label and retry locally.
           EOF
           )
           gh pr create \
@@ -222,7 +238,7 @@ jobs:
             --head "$BRANCH" \
             --title "$TITLE" \
             --body "$BODY" \
-            --label "needs-human-review,needs-local-sync"
+            --label "needs-human-review,needs-local-sync-enhanced,source-enhanced"
 
       - name: Trigger local fallback issue (if Claude action quota failed)
         if: |
@@ -232,30 +248,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ steps.branch.outputs.name }}
-          UPSTREAM_HEAD: ${{ steps.detect.outputs.upstream_head }}
+          ENHANCED_HEAD: ${{ steps.detect.outputs.enhanced_head }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
         run: |
-          TITLE="Local fallback needed: vanilla sync ${UPSTREAM_HEAD}"
+          TITLE="Local fallback needed: enhanced sync ${ENHANCED_HEAD}"
           BODY=$(cat <<EOF
-          Claude Code Action failed (likely quota or transient error).
+          Claude Code Action failed (likely quota or transient error)
+          during enhanced sync.
 
           Branch: \`${BRANCH}\`
           Conflicts: ${CONFLICTS} files
-          Upstream HEAD: \`${UPSTREAM_HEAD}\`
+          Enhanced HEAD: \`${ENHANCED_HEAD}\`
 
           Run local fallback:
           \`\`\`
           cd ~/Documents/Aplicativos/hermes-agent-fusion
-          git fetch origin
+          git fetch canonical-runtime
           git checkout ${BRANCH}
-          ~/scripts/local-upstream-sync.sh
+          ~/scripts/local-upstream-sync.sh --source=enhanced
           \`\`\`
 
-          The local script (launchd-scheduled) polls for issues with the
-          \`needs-local-sync\` label every 4h and retries automatically.
+          The local script polls issues with \`needs-local-sync-enhanced\`
+          label every 4h and retries automatically.
           EOF
           )
           gh issue create \
             --title "$TITLE" \
             --body "$BODY" \
-            --label "needs-local-sync,auto-sync-failure"
+            --label "needs-local-sync-enhanced,auto-sync-failure,source-enhanced"
