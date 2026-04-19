@@ -36,6 +36,7 @@ class MessageRecord(WebAPIModel):
     timestamp: float
     token_count: int | None = None
     finish_reason: str | None = None
+    modality: str | None = "text"
 
 
 class SessionCreateRequest(WebAPIModel):
