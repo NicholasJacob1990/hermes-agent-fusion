@@ -644,6 +644,67 @@ def _load_category_description(category_dir: Path) -> Optional[str]:
         return None
 
 
+def skills_categories(verbose: bool = False, task_id: str = None) -> str:
+    """List available skill categories with descriptions (progressive disclosure tier 0).
+
+    Restored after vanilla upstream removed it as dead code in commit 8d023e43.
+    The enhanced fork's /api/skills/categories endpoint + webapi/routes/skills.py
+    still depend on it, so the fusion re-adds the exact pre-removal body.
+    """
+    try:
+        all_dirs = [SKILLS_DIR] if SKILLS_DIR.exists() else []
+        try:
+            from agent.skill_utils import get_external_skills_dirs
+            all_dirs.extend(d for d in get_external_skills_dirs() if d.exists())
+        except Exception:
+            pass
+        if not all_dirs:
+            return json.dumps(
+                {"success": True, "categories": [], "message": "No skills directory found."},
+                ensure_ascii=False,
+            )
+
+        category_dirs = {}
+        category_counts: Dict[str, int] = {}
+        for scan_dir in all_dirs:
+            for skill_md in scan_dir.rglob("SKILL.md"):
+                if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                    continue
+                try:
+                    frontmatter, _ = _parse_frontmatter(
+                        skill_md.read_text(encoding="utf-8")[:4000]
+                    )
+                except Exception:
+                    frontmatter = {}
+                if not skill_matches_platform(frontmatter):
+                    continue
+                category = _get_category_from_path(skill_md)
+                if category:
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                    if category not in category_dirs:
+                        category_dirs[category] = skill_md.parent.parent
+
+        categories = []
+        for name in sorted(category_dirs.keys()):
+            category_dir = category_dirs[name]
+            description = _load_category_description(category_dir)
+            cat_entry = {"name": name, "skill_count": category_counts[name]}
+            if description:
+                cat_entry["description"] = description
+            categories.append(cat_entry)
+
+        return json.dumps(
+            {
+                "success": True,
+                "categories": categories,
+                "hint": "If a category is relevant to your task, use skills_list with that category to see available skills",
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
 def skills_list(category: str = None, task_id: str = None) -> str:
     """
     List all available skills (progressive disclosure tier 1 - minimal metadata).
