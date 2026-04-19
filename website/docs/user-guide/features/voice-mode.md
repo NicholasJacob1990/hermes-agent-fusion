@@ -10,6 +10,8 @@ Hermes Agent supports full voice interaction across CLI and messaging platforms.
 
 If you want a practical setup walkthrough with recommended configurations and real usage patterns, see [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes).
 
+If you want Pipecat + Gemini Live as the realtime voice layer while Hermes remains the downstream agent brain, see [Bridge Gemini Live + Pipecat to Hermes](/docs/guides/pipecat-gemini-live-hermes).
+
 ## Prerequisites
 
 Before using voice features, make sure you have:

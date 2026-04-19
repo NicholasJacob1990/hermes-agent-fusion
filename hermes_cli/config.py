@@ -585,6 +585,7 @@ DEFAULT_CONFIG = {
     # Text-to-speech configuration
     "tts": {
         "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "neutts" (local)
+        "fallback_provider": "",  # Optional secondary provider, e.g. "mistral"
         "edge": {
             "voice": "en-US-AriaNeural",
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
@@ -637,6 +638,26 @@ DEFAULT_CONFIG = {
         "auto_tts": False,
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop
+    },
+
+    # Pipecat/Gemini Live bridge -- optional realtime voice transport that
+    # keeps Hermes as the downstream agent brain via function/tool delegation.
+    "pipecat": {
+        "tool_name": "run_hermes_agent",
+        "gemini_live_model": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini_live_voice": "Charon",
+        "tool_timeout_secs": 300,
+        "session_prefix": "pipecat-gemini-live",
+        "gemini_system_instruction": "",
+        "hermes_system_message": "",
+        "telegram_voice_live": False,
+        "agent": {
+            "model": "",            # empty = inherit Hermes default model
+            "provider": "",         # empty = inherit Hermes default provider
+            "toolsets": [],          # empty = Hermes agent defaults
+            "max_iterations": 90,
+            "quiet_mode": True,
+        },
     },
     
     "human_delay": {

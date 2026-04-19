@@ -6054,32 +6054,68 @@ class GatewayRunner:
         audio_path = None
         actual_path = None
         try:
-            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
-
-            tts_text = _strip_markdown_for_tts(text[:4000])
-            if not tts_text:
-                return
-
-            # Use .mp3 extension so edge-tts conversion to opus works correctly.
-            # The TTS tool may convert to .ogg — use file_path from result.
-            audio_path = os.path.join(
-                tempfile.gettempdir(), "hermes_voice",
-                f"tts_reply_{_uuid.uuid4().hex[:12]}.mp3",
-            )
-            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
-
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
-            result = json.loads(result_json)
-
-            # Use the actual file path from result (may differ after opus conversion)
-            actual_path = result.get("file_path", audio_path)
-            if not result.get("success") or not os.path.isfile(actual_path):
-                logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
-                return
-
             adapter = self.adapters.get(event.source.platform)
+            runner_config = getattr(self, "config", None)
+            use_gemini_live = (
+                bool(getattr(runner_config, "telegram_voice_live_enabled", False))
+                and event.source.platform == Platform.TELEGRAM
+            )
+
+            if use_gemini_live:
+                from agent.gemini_live_voice import synthesize_speech_via_gemini_live
+                from tools.tts_tool import _strip_markdown_for_tts
+
+                tts_text = _strip_markdown_for_tts(text[:4000])
+                if not tts_text:
+                    return
+                logger.info(
+                    "Preparing Gemini Live voice reply: platform=%s chat=%s chars=%s",
+                    event.source.platform.value,
+                    event.source.chat_id,
+                    len(tts_text),
+                )
+                result = await synthesize_speech_via_gemini_live(tts_text)
+                actual_path = result.get("file_path")
+                if not result.get("success") or not actual_path or not os.path.isfile(actual_path):
+                    logger.warning(
+                        "Gemini Live voice reply failed, falling back to configured TTS provider: %s",
+                        result.get("error"),
+                    )
+                    actual_path = None
+                else:
+                    logger.info(
+                        "Gemini Live voice reply ready: platform=%s chat=%s file=%s provider=%s",
+                        event.source.platform.value,
+                        event.source.chat_id,
+                        actual_path,
+                        result.get("provider", "unknown"),
+                    )
+
+            if not actual_path:
+                from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
+
+                tts_text = _strip_markdown_for_tts(text[:4000])
+                if not tts_text:
+                    return
+
+                # Use .mp3 extension so edge-tts conversion to opus works correctly.
+                # The TTS tool may convert to .ogg — use file_path from result.
+                audio_path = os.path.join(
+                    tempfile.gettempdir(), "hermes_voice",
+                    f"tts_reply_{_uuid.uuid4().hex[:12]}.mp3",
+                )
+                os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+
+                result_json = await asyncio.to_thread(
+                    text_to_speech_tool, text=tts_text, output_path=audio_path
+                )
+                result = json.loads(result_json)
+
+                # Use the actual file path from result (may differ after opus conversion)
+                actual_path = result.get("file_path", audio_path)
+                if not result.get("success") or not os.path.isfile(actual_path):
+                    logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
+                    return
 
             # If connected to a voice channel, play there instead of sending a file
             guild_id = self._get_guild_id(event)

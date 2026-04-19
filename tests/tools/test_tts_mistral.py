@@ -182,6 +182,32 @@ class TestTtsDispatcherMistral:
         assert result["provider"] == "mistral"
         mock_mistral_module.audio.speech.complete.assert_called_once()
 
+    def test_dispatcher_falls_back_from_edge_to_mistral_for_telegram(
+        self, mock_mistral_module, monkeypatch
+    ):
+        import json
+
+        from tools.tts_tool import text_to_speech_tool
+
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+        mock_mistral_module.audio.speech.complete.return_value = MagicMock(
+            audio_data=base64.b64encode(b"opus-audio").decode()
+        )
+
+        with patch("tools.tts_tool._import_edge_tts", return_value=MagicMock()), \
+             patch("tools.tts_tool._generate_edge_tts", side_effect=RuntimeError("edge down")), \
+             patch(
+                 "tools.tts_tool._load_tts_config",
+                 return_value={"provider": "edge", "fallback_provider": "mistral"},
+             ):
+            result = json.loads(text_to_speech_tool("Hello"))
+
+        assert result["success"] is True
+        assert result["provider"] == "mistral"
+        assert result["file_path"].endswith(".ogg")
+        assert result["voice_compatible"] is True
+
     def test_dispatcher_returns_error_when_sdk_not_installed(self, tmp_path, monkeypatch):
         import json
 

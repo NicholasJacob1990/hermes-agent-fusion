@@ -1694,6 +1694,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 # .ogg files -> send as voice (round playable bubble)
                 if audio_path.endswith((".ogg", ".opus")):
                     _voice_thread = self._metadata_thread_id(metadata)
+                    logger.info(
+                        "[%s] Sending Telegram voice bubble to chat=%s reply_to=%s file=%s",
+                        self.name,
+                        chat_id,
+                        reply_to,
+                        audio_path,
+                    )
                     msg = await self._bot.send_voice(
                         chat_id=int(chat_id),
                         voice=audio_file,
@@ -1704,6 +1711,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 else:
                     # .mp3 and others -> send as audio file
                     _audio_thread = self._metadata_thread_id(metadata)
+                    logger.info(
+                        "[%s] Sending Telegram audio attachment to chat=%s reply_to=%s file=%s",
+                        self.name,
+                        chat_id,
+                        reply_to,
+                        audio_path,
+                    )
                     msg = await self._bot.send_audio(
                         chat_id=int(chat_id),
                         audio=audio_file,
@@ -1711,6 +1725,13 @@ class TelegramAdapter(BasePlatformAdapter):
                         reply_to_message_id=int(reply_to) if reply_to else None,
                         message_thread_id=self._message_thread_id_for_send(_audio_thread),
                     )
+            logger.info(
+                "[%s] Telegram voice/audio sent successfully: chat=%s message_id=%s file=%s",
+                self.name,
+                chat_id,
+                getattr(msg, "message_id", None),
+                audio_path,
+            )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             logger.error(

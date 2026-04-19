@@ -32,6 +32,22 @@ def test_load_gateway_config_bridges_stt_enabled_from_config_yaml(tmp_path, monk
     assert config.stt_enabled is False
 
 
+def test_load_gateway_config_bridges_pipecat_telegram_voice_live_from_config_yaml(tmp_path, monkeypatch):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        yaml.dump({"pipecat": {"telegram_voice_live": True}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    config = load_gateway_config()
+
+    assert config.telegram_voice_live_enabled is True
+
+
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_skips_when_stt_disabled():
     from gateway.run import GatewayRunner
@@ -114,3 +130,40 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
     assert result is not None
     assert "queued voice transcript" in result
     assert "voice message" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_send_voice_reply_uses_gemini_live_for_telegram_when_enabled(tmp_path):
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(telegram_voice_live_enabled=True)
+    adapter = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._get_guild_id = lambda event: None
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="123",
+        chat_type="dm",
+    )
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        message_id="msg-1",
+    )
+
+    fake_audio = tmp_path / "gemini-reply.ogg"
+    fake_audio.write_bytes(b"ogg")
+
+    with patch(
+        "agent.gemini_live_voice.synthesize_speech_via_gemini_live",
+        new=AsyncMock(return_value={"success": True, "file_path": str(fake_audio)}),
+    ) as gemini_mock:
+        await runner._send_voice_reply(event, "Resposta falada")
+
+    gemini_mock.assert_awaited_once()
+    adapter.send_voice.assert_awaited_once()
+    kwargs = adapter.send_voice.await_args.kwargs
+    assert kwargs["audio_path"] == str(fake_audio)
