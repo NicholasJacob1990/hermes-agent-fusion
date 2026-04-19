@@ -7,6 +7,19 @@ from fastapi import HTTPException
 
 from hermes_cli.config import load_config
 
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def is_voice_browser_enabled() -> bool:
+    """Whether the Pipecat browser voice client is active.
+
+    Controlled by the ``HERMES_VOICE_BROWSER_ENABLED`` environment variable.
+    Defaults to OFF so feature rolls out only when explicitly enabled.
+    """
+    raw = os.getenv("HERMES_VOICE_BROWSER_ENABLED", "")
+    return raw.strip().lower() in _TRUTHY_ENV_VALUES
+
 def _extract_model_string(model_value) -> str:
     """Extract the model string from config, handling both str and dict formats.
 
